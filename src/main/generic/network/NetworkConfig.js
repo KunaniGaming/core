@@ -73,6 +73,13 @@ class NetworkConfig {
     }
 
     /**
+     * @type {number}
+     */
+    get protocol() {
+        throw 'Unimplemented';
+    }
+
+    /**
      * Used for filtering peer addresses by protocols.
      * @type {number}
      */
@@ -130,7 +137,6 @@ class NetworkConfig {
         return (protocol & this._protocolMask) !== 0;
     }
 }
-
 Class.register(NetworkConfig);
 
 class WsNetworkConfig extends NetworkConfig {
@@ -138,32 +144,53 @@ class WsNetworkConfig extends NetworkConfig {
      * @constructor
      * @param {string} host
      * @param {number} port
-     * @param {string} key
-     * @param {string} cert
+     * @param {{enabled: boolean, port: number, address: string, header: string}} reverseProxy
      */
-    constructor(host, port, key, cert) {
-        super(Protocol.WS);
+    constructor(host, port, reverseProxy) {
+        super(Protocol.WS | Protocol.WSS);
         this._host = host;
         this._port = port;
-        this._key = key;
-        this._cert = cert;
+        this._usingReverseProxy = reverseProxy.enabled;
 
-        /* @type {{key: string, cert: string}} */
-        this._sslConfig = {
-            key: this._key,
-            cert: this._cert
+        /* @type {{port: number, address: string, header: string}} */
+        this._reverseProxyConfig = {
+            port: reverseProxy.port,
+            address: reverseProxy.address,
+            header: reverseProxy.header
         };
     }
 
     /**
-     * @type {{key: string, cert: string}}
+     * @type {number}
+     * @override
      */
-    get sslConfig() {
-        return this._sslConfig;
+    get protocol() {
+        return Protocol.WS;
     }
 
     /**
-     * @type {WsPeerAddress}
+     * @type {number}
+     */
+    get port() {
+        return this._port;
+    }
+
+    /**
+     * @type {boolean}
+     */
+    get usingReverseProxy() {
+        return this._usingReverseProxy;
+    }
+
+    /**
+     * @type {{port: number, address: string, header: string}}
+     */
+    get reverseProxyConfig() {
+        return this._reverseProxyConfig;
+    }
+
+    /**
+     * @type {WsPeerAddress|WssPeerAddress}
      * @override
      */
     get peerAddress() {
@@ -171,33 +198,117 @@ class WsNetworkConfig extends NetworkConfig {
             throw 'PeerAddress is not configured.';
         }
 
+        const port = this._usingReverseProxy ? this._reverseProxyConfig.port : this._port;
         const peerAddress = new WsPeerAddress(
             this._services.provided, Date.now(), NetAddress.UNSPECIFIED,
             this.publicKey, /*distance*/ 0,
-            this._host, this._port);
+            this._host, port);
 
         if (!peerAddress.globallyReachable()) {
             throw 'PeerAddress not globally reachable.';
         }
+
         peerAddress.signature = Signature.create(this._keyPair.privateKey, this.publicKey, peerAddress.serializeContent());
         return peerAddress;
     }
-}
 
+    /**
+     * @type {boolean}
+     */
+    get secure() {
+        return false;
+    }
+}
 Class.register(WsNetworkConfig);
+
+class WssNetworkConfig extends WsNetworkConfig {
+    /**
+     * @constructor
+     * @param {string} host
+     * @param {number} port
+     * @param {string} [key]
+     * @param {string} [cert]
+     * @param {{enabled: boolean, port: number, address: string, header: string}} reverseProxy
+     */
+    constructor(host, port, key, cert, reverseProxy) {
+        super(host, port, reverseProxy);
+        this._key = key;
+        this._cert = cert;
+
+        /** @type {{key: string, cert: string}} */
+        this._sslConfig = {
+            key: this._key,
+            cert: this._cert
+        };
+    }
+
+    /**
+     * @type {number}
+     * @override
+     */
+    get protocol() {
+        return Protocol.WSS;
+    }
+
+    /**
+     * @type {?{key: string, cert: string}}
+     */
+    get sslConfig() {
+        return this._sslConfig;
+    }
+
+    /**
+     * @type {WsPeerAddress|WssPeerAddress}
+     * @override
+     */
+    get peerAddress() {
+        if (!this._services || !this._keyPair) {
+            throw 'PeerAddress is not configured.';
+        }
+
+        const port = this._usingReverseProxy ? this._reverseProxyConfig.port : this._port;
+        const peerAddress = new WssPeerAddress(
+            this._services.provided, Date.now(), NetAddress.UNSPECIFIED,
+            this.publicKey, /*distance*/ 0,
+            this._host, port);
+
+        if (!peerAddress.globallyReachable()) {
+            throw 'PeerAddress not globally reachable.';
+        }
+
+        peerAddress.signature = Signature.create(this._keyPair.privateKey, this.publicKey, peerAddress.serializeContent());
+        return peerAddress;
+    }
+
+    /**
+     * @type {boolean}
+     */
+    get secure() {
+        return true;
+    }
+}
+Class.register(WssNetworkConfig);
 
 class RtcNetworkConfig extends NetworkConfig {
     /**
      * @constructor
      */
     constructor() {
-        super(Protocol.WS | Protocol.RTC);
+        super((PlatformUtils.supportsWS() ? (Protocol.WS | Protocol.WSS) : Protocol.WSS) | Protocol.RTC);
         this._rtcConfig = {
             iceServers: [
                 {urls: 'stun:stun.l.google.com:19302'},
                 {urls: 'stun:stun.nimiq-network.com:19302'}
             ]
         };
+    }
+
+    /**
+     * @type {number}
+     * @override
+     */
+    get protocol() {
+        return Protocol.RTC;
     }
 
     /**
@@ -223,7 +334,6 @@ class RtcNetworkConfig extends NetworkConfig {
         return peerAddress;
     }
 }
-
 Class.register(RtcNetworkConfig);
 
 class DumbNetworkConfig extends NetworkConfig {
@@ -231,7 +341,16 @@ class DumbNetworkConfig extends NetworkConfig {
      * @constructor
      */
     constructor() {
-        super(Protocol.WS);
+        // Browsers served through https only speak WSS. Everything else should also support WS.
+        super(PlatformUtils.supportsWS() ? (Protocol.WS | Protocol.WSS) : Protocol.WSS);
+    }
+
+    /**
+     * @type {number}
+     * @override
+     */
+    get protocol() {
+        return Protocol.DUMB;
     }
 
     /**
@@ -250,5 +369,4 @@ class DumbNetworkConfig extends NetworkConfig {
         return peerAddress;
     }
 }
-
 Class.register(DumbNetworkConfig);

@@ -4,12 +4,12 @@ const merge = require('lodash.merge');
 const Log = require('../../../dist/node.js').Log;
 const TAG = 'Config';
 
-
 /**
  * @typedef {object} Config
  * @property {string} host
  * @property {{cert: string, key: string}} tls
  * @property {number} port
+ * @property {string} protocol
  * @property {boolean} dumb
  * @property {string} type
  * @property {string} network
@@ -17,11 +17,12 @@ const TAG = 'Config';
  * @property {number} statistics
  * @property {{enabled: boolean, threads: string|number, throttleAfter: number, throttleWait: number, extraData: string}} miner
  * @property {{enabled: boolean, host: string, port: number}} poolMining
- * @property {{enabled: boolean, port: number, corsdomain: string|Array.<string>}} rpcServer
+ * @property {{enabled: boolean, port: number, corsdomain: string|Array.<string>, allowip: string|Array.<string>, username: string, password: string}} rpcServer
  * @property {{enabled: boolean, port: number, password: string}} metricsServer
  * @property {{seed: string, address: string}} wallet
+ * @property {{enabled: boolean, port: number, address: string, header: string}} reverseProxy
  * @property {{level: string, tags: object}} log
- * @property {Array.<{host: string, port: number, publicKey: string}>} seedPeers
+ * @property {Array.<{host: string, port: number, publicKey: string, protocol: string}>} seedPeers
  * @property {object} constantOverrides
  */
 
@@ -32,7 +33,8 @@ const DEFAULT_CONFIG = /** @type {Config} */ {
         key: null
     },
     port: 8443,
-    dumb: false,
+    protocol: 'wss',
+    dumb: false, // deprecated
     type: 'full',
     network: 'main',
     passive: false,
@@ -48,12 +50,14 @@ const DEFAULT_CONFIG = /** @type {Config} */ {
         enabled: false,
         host: null,
         port: -1,
-        mode: 'smart'
+        mode: 'smart',
+        deviceData: null
     },
     rpcServer: {
         enabled: false,
         port: 8648,
         corsdomain: null,
+        allowip: null,
         username: null,
         password: null
     },
@@ -65,6 +69,12 @@ const DEFAULT_CONFIG = /** @type {Config} */ {
     wallet: {
         seed: null,
         address: null
+    },
+    reverseProxy: {
+        enabled: false,
+        port: 8444,
+        address: '::ffff:127.0.0.1',
+        header: 'x-forwarded-for'
     },
     log: {
         level: 'info',
@@ -83,7 +93,8 @@ const CONFIG_TYPES = {
         }
     },
     port: 'number',
-    dumb: 'boolean',
+    protocol: {type: 'string', values: ['wss', 'ws', 'dumb']},
+    dumb: 'boolean', // deprecated
     type: {type: 'string', values: ['full', 'light', 'nano']},
     network: 'string',
     passive: 'boolean',
@@ -102,7 +113,8 @@ const CONFIG_TYPES = {
             enabled: 'boolean',
             host: 'string',
             port: 'number',
-            mode: {type: 'string', values: ['smart', 'nano']}
+            mode: {type: 'string', values: ['smart', 'nano']},
+            deviceData: 'object'
         }
     },
     rpcServer: {
@@ -110,6 +122,7 @@ const CONFIG_TYPES = {
             enabled: 'boolean',
             port: 'number',
             corsdomain: {type: 'mixed', types: ['string', {type: 'array', inner: 'string'}]},
+            allowip: {type: 'mixed', types: ['string', {type: 'array', inner: 'string'}]},
             username: 'string',
             password: 'string'
         }
@@ -127,6 +140,14 @@ const CONFIG_TYPES = {
             address: 'string'
         }
     },
+    reverseProxy: {
+        type: 'object', sub: {
+            enabled: 'boolean',
+            port: 'number',
+            address: 'string',
+            header: 'string'
+        }
+    },
     log: {
         type: 'object', sub: {
             level: {type: 'string', values: ['trace', 'verbose', 'debug', 'info', 'warning', 'error', 'assert']},
@@ -138,7 +159,8 @@ const CONFIG_TYPES = {
             type: 'object', sub: {
                 host: 'string',
                 port: 'number',
-                publicKey: 'string'
+                publicKey: 'string',
+                protocol: {type: 'string', values: ['wss', 'ws']}
             }
         }
     },
@@ -270,7 +292,8 @@ function readFromArgs(argv, config = merge({}, DEFAULT_CONFIG)) {
     if (typeof argv.port === 'string') config.port = parseInt(argv.port);
     if (typeof argv.cert === 'string') config.tls.cert = argv.cert;
     if (typeof argv.key === 'string') config.tls.key = argv.key;
-    if (argv.dumb) config.dumb = true;
+    if (typeof argv.protocol === 'string') config.protocol = argv.protocol;
+    if (argv.dumb) config.dumb = argv.dumb; // deprecated
     if (typeof argv.type === 'string') config.type = argv.type;
     if (typeof argv.network === 'string') config.network = argv.network;
     if (argv.passive) config.passive = true;
@@ -293,6 +316,13 @@ function readFromArgs(argv, config = merge({}, DEFAULT_CONFIG)) {
             config.poolMining.port = parseInt(split[1]);
         }
     }
+    if (argv['device-data'] && config.poolMining.enabled) {
+        try {
+            config.poolMining.deviceData = JSON.parse(argv['device-data']);
+        } catch (e) {
+            return false;
+        }
+    }
     if (argv.rpc) {
         config.rpcServer.enabled = true;
         if (typeof argv.rpc === 'number') config.rpcServer.port = argv.rpc;
@@ -309,6 +339,15 @@ function readFromArgs(argv, config = merge({}, DEFAULT_CONFIG)) {
     }
     if (typeof argv['wallet-seed'] === 'string') config.wallet.seed = argv['wallet-seed'];
     if (typeof argv['wallet-address'] === 'string') config.wallet.address = argv['wallet-address'];
+    if (argv['reverse-proxy']) {
+        config.reverseProxy.enabled = true;
+        if (typeof argv['reverse-proxy'] === 'number') config.reverseProxy.port = argv['reverse-proxy'];
+        if (typeof argv['reverse-proxy'] === 'string') {
+            const split = argv['reverse-proxy'].split(',', 2);
+            config.reverseProxy.port = parseInt(split[0]);
+            if (split.length === 2) config.reverseProxy.address = split[1];
+        }
+    }
     if (argv.log || argv.verbose) {
         config.log.level = 'verbose';
         if (typeof argv.log === 'number') config.log.level = argv.log;

@@ -50,6 +50,7 @@ const sources = {
         './src/main/generic/utils/Timers.js',
         './src/main/generic/utils/Version.js',
         './src/main/generic/utils/Time.js',
+        './src/main/generic/utils/IteratorUtils.js',
         './src/main/generic/utils/array/ArrayUtils.js',
         './src/main/generic/utils/array/HashMap.js',
         './src/main/generic/utils/array/HashSet.js',

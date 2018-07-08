@@ -1,24 +1,39 @@
 class WebSocketFactory {
     /**
      * @static
-     * @param {NetworkConfig} networkConfig
+     * @param {WsNetworkConfig|WssNetworkConfig} networkConfig
      * @return {WebSocketServer}
      */
     static newWebSocketServer(networkConfig) {
-        const port = networkConfig.peerAddress.port;
-        const sslConfig = networkConfig.sslConfig;
+        const port = networkConfig.port;
 
-        const options = {
-            key: fs.readFileSync(sslConfig.key),
-            cert: fs.readFileSync(sslConfig.cert)
-        };
+        let server;
 
-        const httpsServer = https.createServer(options, (req, res) => {
-            res.writeHead(200);
-            res.end('Nimiq NodeJS Client\n');
-        }).listen(port);
+        if (networkConfig.secure) {
+            const sslConfig = networkConfig.sslConfig;
+            const options = {
+                key: fs.readFileSync(sslConfig.key),
+                cert: fs.readFileSync(sslConfig.cert)
+            };
 
-        return new WebSocket.Server({ server: httpsServer });
+            server = https.createServer(options, (req, res) => {
+                res.writeHead(200);
+                res.end('Nimiq NodeJS Client\n');
+            }).listen(port);
+
+            // We have to access socket.remoteAddress here because otherwise req.connection.remoteAddress won't be set in the WebSocket's 'connection' event (yay)
+            server.on('secureConnection', socket => socket.remoteAddress);
+        } else {
+            server = http.createServer((req, res) => {
+                res.writeHead(200);
+                res.end('Nimiq NodeJS Client\n');
+            }).listen(port);
+
+            // We have to access socket.remoteAddress here because otherwise req.connection.remoteAddress won't be set in the WebSocket's 'connection' event (yay)
+            server.on('socket', socket => socket.remoteAddress);
+        }
+
+        return new WebSocket.Server({ server: server });
     }
 
     /**

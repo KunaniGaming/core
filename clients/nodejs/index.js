@@ -5,23 +5,34 @@ const JsonRpcServer = require('./modules/JsonRpcServer.js');
 const MetricsServer = require('./modules/MetricsServer.js');
 const config = require('./modules/Config.js')(argv);
 
-if ((!config.host || !config.port || !config.tls.key || !config.tls.cert) && !config.dumb || argv.help) {
+// Deprecated dumb config flag.
+if (config.dumb) {
+    console.error(`The '--dumb' flag is deprecated, use '--protocol=dumb' instead.`);
+    config.protocol = 'dumb';
+}
+
+if ((config.protocol === 'wss' && !(config.host && config.port && config.tls && config.tls.cert && config.tls.key)) ||
+    (config.protocol === 'ws' && !(config.host && config.port)) ||
+    argv.help) {
     console.log(
         'Nimiq NodeJS client\n' +
         '\n' +
         'Usage:\n' +
         '    node index.js --config=CONFIG [options]\n' +
-        '    node index.js --host=HOSTNAME --port=PORT --cert=SSL_CERT_FILE --key=SSL_KEY_FILE [options]\n' +
-        '    node index.js --dumb [options]\n' +
+        '    node index.js --host=HOSTNAME --port=PORT [--cert=SSL_CERT_FILE] [--key=SSL_KEY_FILE] [options]\n' +
+        '    node index.js --host=HOSTNAME --port=PORT --protocol=ws [options]\n' +
         '\n' +
         'Configuration:\n' +
         '  --cert=SSL_CERT_FILE       Certificate file to use. CN should match HOSTNAME.\n' +
-        '  --dumb                     Set up a dumb node. Other nodes will not be able\n' +
-        '                             to connect to this node, but you may connect to\n' +
-        '                             others.\n' +
         '  --host=HOSTNAME            Configure hostname.\n' +
         '  --key=SSL_KEY_FILE         Private key file to use.\n' +
         '  --port=PORT                Specifies which port to listen on for connections.\n' +
+        '  --protocol=TYPE            Set up the protocol to be used. Available protocols are\n' +
+        '                              - wss: WebSocket Secure, requires a FQDN, port,\n' +
+        '                                     and SSL certificate\n' +
+        '                              - ws: WebSocket, only requires public IP/FQDN and port\n' +
+        '                              - dumb: discouraged as the number of dumb nodes might\n' +
+        '                                      be limited\n' +
         '\n' +
         'Options:\n' +
         '  --help                     Show this usage instructions.\n' +
@@ -31,6 +42,8 @@ if ((!config.host || !config.port || !config.tls.key || !config.tls.cert) && !co
         '  --miner[=THREADS]          Activate mining on this node. The miner will be set\n' +
         '                             up to use THREADS parallel threads.\n' +
         '  --pool=SERVER:PORT         Mine shares for mining pool with address SERVER:PORT\n' +
+        '  --device-data=DATA_JSON    Pass information about this device to the pool. Takes a\n' +
+        '                             valid JSON string. Only used when registering for a pool.\n' +
         '  --passive                  Do not actively connect to the network and do not\n' +
         '                             wait for connection establishment.\n' +
         '  --rpc[=PORT]               Start JSON-RPC server on port PORT (default: 8648).\n' +
@@ -43,6 +56,8 @@ if ((!config.host || !config.port || !config.tls.key || !config.tls.cert) && !co
         '                             seconds.\n' +
         '  --type=TYPE                Configure the consensus type to establish, one of\n' +
         '                             full (default), light, or nano.\n' +
+        '  --reverse-proxy[=PORT]     This client is behind a reverse proxy running on PORT,IP\n' +
+        '                 [,IP]       (default: 8444,::ffff:127.0.0.1).\n' +
         '  --wallet-seed=SEED         Initialize wallet using SEED as a wallet seed.\n' +
         '  --wallet-address=ADDRESS   Initialize wallet using ADDRESS as a wallet address\n' +
         '                             The wallet cannot be used to sign transactions when\n' +
@@ -57,15 +72,15 @@ if ((!config.host || !config.port || !config.tls.key || !config.tls.cert) && !co
 const isNano = config.type === 'nano';
 
 if (isNano && config.miner.enabled) {
-    console.error('Cannot mine when running as a nano client.');
+    console.error('Cannot mine when running as a nano client');
     process.exit(1);
 }
-if (config.metricsServer.enabled && config.dumb) {
-    console.error('Cannot provide metrics when running as a dumb client.');
+if (config.metricsServer.enabled && config.protocol !== 'wss') {
+    console.error('Cannot provide metrics when running as without a certificate');
     process.exit(1);
 }
 if (config.metricsServer.enabled && isNano) {
-    console.error('Cannot provide metrics when running as a nano client.');
+    console.error('Cannot provide metrics when running as a nano client');
     process.exit(1);
 }
 if (!Nimiq.GenesisConfig.CONFIGS[config.network]) {
@@ -76,12 +91,16 @@ if (config.wallet.seed && config.wallet.address) {
     console.error('Cannot use both --wallet-seed and --wallet-address');
     process.exit(1);
 }
-if (config.host && config.dumb) {
-    console.error('Cannot use both --host and --dumb');
+if (config.host && config.protocol === 'dumb') {
+    console.error('Cannot use both --host and --protocol=dumb');
+    process.exit(1);
+}
+if (config.reverseProxy.enabled && config.protocol === 'dumb') {
+    console.error('Cannot run a dumb client behind a reverse proxy');
     process.exit(1);
 }
 if (config.type === 'light') {
-    console.error('Light node type is temporarily disabled.');
+    console.error('Light node type is temporarily disabled');
     process.exit(1);
 }
 
@@ -105,6 +124,15 @@ const TAG = 'Node';
 const $ = {};
 
 (async () => {
+    if (config.protocol === 'dumb') {
+        Nimiq.Log.e(TAG, `******************************************************************************`);
+        Nimiq.Log.e(TAG, `*                                                                            *`);
+        Nimiq.Log.e(TAG, `*  You are running in 'dumb' configuration, so others can't connect to you.  *`);
+        Nimiq.Log.e(TAG, `*  Consider switching to a proper WebSocket/WebSocketSecure configuration.   *`);
+        Nimiq.Log.e(TAG, `*                                                                            *`);
+        Nimiq.Log.e(TAG, `******************************************************************************`);
+    }
+
     Nimiq.Log.i(TAG, `Nimiq NodeJS Client starting (network=${config.network}`
         + `, ${config.host ? `host=${config.host}, port=${config.port}` : 'dumb'}`
         + `, miner=${config.miner.enabled}, rpc=${config.rpcServer.enabled}${config.rpcServer.enabled ? `@${config.rpcServer.port}` : ''}`
@@ -112,13 +140,32 @@ const $ = {};
 
     Nimiq.GenesisConfig.init(Nimiq.GenesisConfig.CONFIGS[config.network]);
 
-    for(const seedPeer of config.seedPeers) {
-        Nimiq.GenesisConfig.SEED_PEERS.push(Nimiq.WsPeerAddress.seed(seedPeer.host, seedPeer.port, seedPeer.publicKey));
+    for (const seedPeer of config.seedPeers) {
+        let address;
+        switch (seedPeer.protocol) {
+            case 'ws':
+                address = Nimiq.WsPeerAddress.seed(seedPeer.host, seedPeer.port, seedPeer.publicKey);
+                break;
+            case 'wss':
+            default:
+                address = Nimiq.WssPeerAddress.seed(seedPeer.host, seedPeer.port, seedPeer.publicKey);
+                break;
+        }
+        Nimiq.GenesisConfig.SEED_PEERS.push(address);
     }
 
-    const networkConfig = config.dumb
-        ? new Nimiq.DumbNetworkConfig()
-        : new Nimiq.WsNetworkConfig(config.host, config.port, config.tls.key, config.tls.cert);
+    let networkConfig;
+    switch (config.protocol) {
+        case 'wss':
+            networkConfig = new Nimiq.WssNetworkConfig(config.host, config.port, config.tls.key, config.tls.cert, config.reverseProxy);
+            break;
+        case 'ws':
+            networkConfig = new Nimiq.WsNetworkConfig(config.host, config.port, config.reverseProxy);
+            break;
+        case 'dumb':
+            networkConfig = new Nimiq.DumbNetworkConfig();
+            break;
+    }
 
     switch (config.type) {
         case 'full':
@@ -173,14 +220,15 @@ const $ = {};
     const extraData = config.miner.extraData ? Nimiq.BufferUtils.fromAscii(config.miner.extraData) : new Uint8Array(0);
     if (config.poolMining.enabled) {
         const deviceId = Nimiq.BasePoolMiner.generateDeviceId(networkConfig);
+        const deviceData = config.poolMining.deviceData;
         const poolMode = isNano ? 'nano' : config.poolMining.mode;
         switch (poolMode) {
             case 'nano':
-                $.miner = new Nimiq.NanoPoolMiner($.blockchain, $.network.time, $.wallet.address, deviceId);
+                $.miner = new Nimiq.NanoPoolMiner($.blockchain, $.network.time, $.wallet.address, deviceId, deviceData);
                 break;
             case 'smart':
             default:
-                $.miner = new Nimiq.SmartPoolMiner($.blockchain, $.accounts, $.mempool, $.network.time, $.wallet.address, deviceId, extraData);
+                $.miner = new Nimiq.SmartPoolMiner($.blockchain, $.accounts, $.mempool, $.network.time, $.wallet.address, deviceId, deviceData, extraData);
                 break;
         }
         $.consensus.on('established', () => {
@@ -239,10 +287,11 @@ const $ = {};
             hashrates.push(hashrate);
 
             if (hashrates.length >= outputInterval) {
-                const account = await $.accounts.get($.wallet.address);
+                const account = !isNano ? await $.accounts.get($.wallet.address) : null;
                 const sum = hashrates.reduce((acc, val) => acc + val, 0);
                 Nimiq.Log.i(TAG, `Hashrate: ${(sum / hashrates.length).toFixed(2).padStart(7)} H/s`
                     + (!isNano ? ` - Balance: ${Nimiq.Policy.satoshisToCoins(account.balance)} NIM` : '')
+                    + (config.poolMining.enabled ? ` - Pool balance: ${Nimiq.Policy.satoshisToCoins($.miner.balance)} NIM (confirmed ${Nimiq.Policy.satoshisToCoins($.miner.confirmedBalance)} NIM)` : '')
                     + ` - Mempool: ${$.mempool.getTransactions().length} tx`);
                 hashrates.length = 0;
             }

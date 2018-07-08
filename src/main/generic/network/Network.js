@@ -270,7 +270,7 @@ class Network extends Observable {
         // recycle
         if (this.peerCount > Network.PEER_COUNT_RECYCLING_ACTIVE) {
             // recycle 1% at PEER_COUNT_RECYCLING_ACTIVE, 20% at PEER_COUNT_MAX
-            const percentageToRecycle = (this.peerCount - Network.PEER_COUNT_RECYCLING_ACTIVE) * 0.19 / (Network.PEER_COUNT_MAX - Network.PEER_COUNT_RECYCLING_ACTIVE) + 0.01;
+            const percentageToRecycle = (this.peerCount - Network.PEER_COUNT_RECYCLING_ACTIVE) * (Network.RECYCLING_PERCENTAGE_MAX - Network.RECYCLING_PERCENTAGE_MIN) / (Network.PEER_COUNT_MAX - Network.PEER_COUNT_RECYCLING_ACTIVE) + Network.RECYCLING_PERCENTAGE_MIN;
             const connectionsToRecycle = Math.ceil(this.peerCount * percentageToRecycle);
             this._scorer.recycleConnections(connectionsToRecycle, CloseType.PEER_CONNECTION_RECYCLED, 'Peer connection recycled');
         }
@@ -287,7 +287,7 @@ class Network extends Observable {
 
     _refreshAddresses() {
         if (this._scorer.connectionScores && this._scorer.connectionScores.length > 0) {
-            const cutoff = Math.min(this._connections.peerCountWs * 2, Network.ADDRESS_REQUEST_CUTOFF);
+            const cutoff = Math.min((this._connections.peerCountWs + this._connections.peerCountWss) * 2, Network.ADDRESS_REQUEST_CUTOFF);
             const length = Math.min(this._scorer.connectionScores.length, cutoff);
             for (let i = 0; i < Math.min(Network.ADDRESS_REQUEST_PEERS, this._scorer.connectionScores.length); i++) {
                 const index = Math.floor(Math.random() * length);
@@ -331,6 +331,11 @@ class Network extends Observable {
     /** @type {number} */
     get peerCountWebSocket() {
         return this._connections.peerCountWs;
+    }
+
+    /** @type {number} */
+    get peerCountWebSocketSecure() {
+        return this._connections.peerCountWss;
     }
 
     /** @type {number} */
@@ -392,7 +397,7 @@ class Network extends Observable {
  * @type {number}
  * @constant
  */
-Network.PEER_COUNT_MAX = PlatformUtils.isBrowser() ? 15 : 10000;
+Network.PEER_COUNT_MAX = PlatformUtils.isBrowser() ? 15 : 4000;
 /**
  * @type {number}
  * @constant
@@ -412,6 +417,11 @@ Network.PEER_COUNT_PER_IP_MAX = PlatformUtils.isBrowser() ? 1 : 20;
  * @type {number}
  * @constant
  */
+Network.PEER_COUNT_DUMB_MAX = 1000;
+/**
+ * @type {number}
+ * @constant
+ */
 Network.IPV4_SUBNET_MASK = 24;
 /**
  * @type {number}
@@ -423,6 +433,16 @@ Network.IPV6_SUBNET_MASK = 96;
  * @constant
  */
 Network.PEER_COUNT_RECYCLING_ACTIVE = PlatformUtils.isBrowser() ? 5 : 1000;
+/**
+ * @type {number}
+ * @constant
+ */
+Network.RECYCLING_PERCENTAGE_MIN = 0.01;
+/**
+ * @type {number}
+ * @constant
+ */
+Network.RECYCLING_PERCENTAGE_MAX = 0.20;
 /**
  * @type {number}
  * @constant
@@ -463,8 +483,20 @@ Network.SCORE_INBOUND_EXCHANGE = 0.5;
  * @constant
  */
 Network.CONNECT_THROTTLE = 1000; // 1 second
-
+/**
+ * @type {number}
+ * @constant
+ */
 Network.ADDRESS_REQUEST_CUTOFF = 250;
+/**
+ * @type {number}
+ * @constant
+ */
 Network.ADDRESS_REQUEST_PEERS = 2;
+/**
+ * @type {number}
+ * @constant
+ */
+Network.SIGNALING_ENABLED = 1;
 
 Class.register(Network);

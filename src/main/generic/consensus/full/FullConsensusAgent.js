@@ -156,16 +156,6 @@ class FullConsensusAgent extends BaseConsensusAgent {
     }
 
     /**
-     * @param {InvMessage} msg
-     * @returns {Promise}
-     * @protected
-     * @override
-     */
-    _onInv(msg) {
-        return super._onInv(msg);
-    }
-
-    /**
      * @param {InvVector} vector
      * @returns {boolean}
      * @protected
@@ -201,12 +191,12 @@ class FullConsensusAgent extends BaseConsensusAgent {
 
     /**
      * @param {Hash} hash
-     * @returns {Promise.<?Transaction>}
+     * @returns {?Transaction}
      * @protected
      * @override
      */
     _getTransaction(hash) {
-        return Promise.resolve(this._mempool.getTransaction(hash));
+        return this._mempool.getTransaction(hash);
     }
 
     /**

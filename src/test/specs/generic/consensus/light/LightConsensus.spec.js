@@ -43,7 +43,7 @@ describe('LightConsensus', () => {
                 });
                 await blockchain2.pushBlock(block);
             }
-            const netConfig2 = new WsNetworkConfig('node2.test', 8080, 'key2', 'cert2');
+            const netConfig2 = new WssNetworkConfig('node2.test', 8080, 'key2', 'cert2', { enabled: false, port: 8444, address: '::ffff:127.0.0.1', header: 'x-forwarded-for'});
             const consensus2 = await Consensus.volatileFull(netConfig2);
             consensus2.network.allowInboundConnections = true;
             await copyChain(blockchain2, consensus2.blockchain);
@@ -64,8 +64,15 @@ describe('LightConsensus', () => {
             consensus3.network._connections.connectOutbound(netConfig2.peerAddress);
 
             setTimeout(() => {
+                expect(consensus1.blockchain.head.equals(blockchain2.head)).toBe(true);
+                expect(consensus1.blockchain.height).toBe(8);
                 expect(consensus3.blockchain.head.equals(blockchain2.head)).toBe(true);
                 expect(consensus3.blockchain.height).toBe(8);
+
+                expect(consensus1.mempool.length).toBe(1);
+                expect(consensus2.mempool.length).toBe(1);
+                expect(consensus3.mempool.length).toBe(1);
+
                 Policy.DIFFICULTY_BLOCK_WINDOW = orgDifficultyBlockWindow;
                 done();
             }, 10000);

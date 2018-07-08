@@ -26,6 +26,13 @@ class PeerAddressBook extends Observable {
         this._wsStates = new HashSet();
 
         /**
+         * Set of only WSS states.
+         * @type {HashSet}
+         * @private
+         */
+        this._wssStates = new HashSet();
+
+        /**
          * @type {HashSet}
          * @private
          */
@@ -68,6 +75,13 @@ class PeerAddressBook extends Observable {
     /**
      * @returns {Iterator.<PeerAddressState>}
      */
+    wssIterator() {
+        return this._wssStates.valueIterator();
+    }
+
+    /**
+     * @returns {Iterator.<PeerAddressState>}
+     */
     rtcIterator() {
         return this._rtcStates.valueIterator();
     }
@@ -78,7 +92,7 @@ class PeerAddressBook extends Observable {
      * @private
      */
     _get(peerAddress) {
-        if (peerAddress instanceof WsPeerAddress) {
+        if (peerAddress instanceof WssPeerAddress || peerAddress instanceof WsPeerAddress) {
             const localPeerAddress = this._store.get(peerAddress.withoutId());
             if (localPeerAddress) return localPeerAddress;
         }
@@ -132,19 +146,37 @@ class PeerAddressBook extends Observable {
      * @returns {Array.<PeerAddress>}
      */
     query(protocolMask, serviceMask, maxAddresses = NetworkAgent.MAX_ADDR_PER_MESSAGE) {
-        let store;
+        let it, numAddresses;
+        // Important: this switches over a *mask*.
         switch (protocolMask) {
+            case Protocol.WSS:
+                it = this.wssIterator();
+                numAddresses = this.knownWssAddressesCount;
+                break;
             case Protocol.WS:
-                store = this._wsStates;
+                it = this.wsIterator();
+                numAddresses = this.knownWsAddressesCount;
+                break;
+            case Protocol.WS | Protocol.WSS:
+                it = IteratorUtils.alternate(this.wsIterator(), this.wssIterator());
+                numAddresses = this.knownWsAddressesCount + this.knownWssAddressesCount;
                 break;
             case Protocol.RTC:
-                store = this._rtcStates;
+                it = this.rtcIterator();
+                numAddresses = this.knownRtcAddressesCount;
+                break;
+            case Protocol.RTC | Protocol.WS:
+                it = IteratorUtils.alternate(this.rtcIterator(), this.wsIterator());
+                numAddresses = this.knownRtcAddressesCount + this.knownWsAddressesCount;
+                break;
+            case Protocol.RTC | Protocol.WSS:
+                it = IteratorUtils.alternate(this.rtcIterator(), this.wssIterator());
+                numAddresses = this.knownRtcAddressesCount + this.knownWssAddressesCount;
                 break;
             default:
-                store = this._store;
+                it = this.iterator();
+                numAddresses = this.knownAddressesCount;
         }
-
-        const numAddresses = store.length;
 
         // Pick a random start index if we have a lot of addresses.
         let startIndex = 0, endIndex = numAddresses;
@@ -157,7 +189,7 @@ class PeerAddressBook extends Observable {
         // XXX inefficient linear scan
         const addresses = [];
         let index = -1;
-        for (const peerAddressState of store.valueIterator()) {
+        for (const peerAddressState of it) {
             index++;
             if (!overflow && index < startIndex) continue;
             if (!overflow && index >= endIndex) break;
@@ -304,6 +336,11 @@ class PeerAddressBook extends Observable {
             }
             // Check max size per protocol.
             switch (peerAddress.protocol) {
+                case Protocol.WSS:
+                    if (this._wssStates.length >= PeerAddressBook.MAX_SIZE_WSS) {
+                        return false;
+                    }
+                    break;
                 case Protocol.WS:
                     if (this._wsStates.length >= PeerAddressBook.MAX_SIZE_WS) {
                         return false;
@@ -365,6 +402,9 @@ class PeerAddressBook extends Observable {
 
         // Index by protocol.
         switch (peerAddressState.peerAddress.protocol) {
+            case Protocol.WSS:
+                this._wssStates.add(peerAddressState);
+                break;
             case Protocol.WS:
                 this._wsStates.add(peerAddressState);
                 break;
@@ -574,6 +614,9 @@ class PeerAddressBook extends Observable {
 
         // Remove from protocol index.
         switch (peerAddressState.peerAddress.protocol) {
+            case Protocol.WSS:
+                this._wssStates.remove(peerAddressState);
+                break;
             case Protocol.WS:
                 this._wsStates.remove(peerAddressState);
                 break;
@@ -689,6 +732,11 @@ class PeerAddressBook extends Observable {
     }
 
     /** @type {number} */
+    get knownWssAddressesCount() {
+        return this._wssStates.length;
+    }
+
+    /** @type {number} */
     get knownRtcAddressesCount() {
         return this._rtcStates.length;
     }
@@ -705,6 +753,7 @@ PeerAddressBook.DEFAULT_BAN_TIME = 1000 * 60 * 10; // 10 minutes
 PeerAddressBook.INITIAL_FAILED_BACKOFF = 1000 * 30; // 30 seconds
 PeerAddressBook.MAX_FAILED_BACKOFF = 1000 * 60 * 10; // 10 minutes
 PeerAddressBook.MAX_SIZE_WS = PlatformUtils.isBrowser() ? 1000 : 10000;
+PeerAddressBook.MAX_SIZE_WSS = PlatformUtils.isBrowser() ? 1000 : 10000;
 PeerAddressBook.MAX_SIZE_RTC = PlatformUtils.isBrowser() ? 1000 : 10000;
 PeerAddressBook.MAX_SIZE = PlatformUtils.isBrowser() ? 2500 : 20500; // Includes dumb peers
 PeerAddressBook.MAX_SIZE_PER_IP = 250;
