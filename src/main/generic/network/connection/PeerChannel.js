@@ -49,14 +49,18 @@ class PeerChannel extends Observable {
 
         if (!msg) return;
 
-        // Confirm that message was successfully parsed.
-        this._conn.confirmExpectedMessage(type, true);
-
         try {
             await this.fire(PeerChannel.Event[msg.type], msg, this);
             this.fire('message-log', msg, this, Date.now() - start, rawMsg.byteLength);
+            
+            // Confirm that message was successfully parsed.
+            this._conn.confirmExpectedMessage(type, true);
+
         } catch (e) {
             Log.w(PeerChannel, `Error while processing '${PeerChannel.Event[msg.type]}' message from ${this.peerAddress || this.netAddress}: ${e}`);
+            
+            // Confirm that message arrived but could not be parsed successfully.
+            this._conn.confirmExpectedMessage(type, false);
         }
     }
 
