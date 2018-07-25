@@ -1,21 +1,39 @@
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const JSON5 = require('json5');
 const btoa = require('btoa');
+const NodeUtils = require('./NodeUtils.js');
 const Nimiq = require('../../../dist/node.js');
 
 class JsonRpcServer {
     /**
-     * @param {{port: number, corsdomain: string|Array.<string>, username: ?string, password: ?string}} config
+     * @param {{port: number, corsdomain: string|Array.<string>, username: ?string, password: ?string, allowip: string|Array.<string>, methods: ?Array.<string>}} config
+     * @param {{enabled: boolean, threads: number, throttleAfter: number, throttleWait: number, extraData: string}} minerConfig
+     * @param {{enabled: boolean, host: string, port: number, mode: string}} poolConfig
      */
-    constructor(config) {
+    constructor(config, minerConfig, poolConfig) {
+        this._config = config;
+        this._minerConfig = minerConfig;
+        this._poolConfig = poolConfig;
+
         if (typeof config.corsdomain === 'string') config.corsdomain = [config.corsdomain];
         if (!config.corsdomain) config.corsdomain = [];
         if (typeof config.allowip === 'string') config.allowip = [config.allowip];
         if (!config.allowip) config.allowip = [];
+
         http.createServer((req, res) => {
+            // Block requests that might originate from a website in the users browser,
+            // unless the origin is explicitly whitelisted.
             if (config.corsdomain.includes(req.headers.origin)) {
                 res.setHeader('Access-Control-Allow-Origin', req.headers.origin);
                 res.setHeader('Access-Control-Allow-Methods', 'POST');
-                res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+                res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+                res.setHeader('Access-Control-Max-Age', '900');
+            } else if (req.headers.origin || req.headers.referer) {
+                res.writeHead(403, `Access not allowed from ${req.headers.origin || req.headers.referer}`);
+                res.end();
+                return;
             }
 
             // Deny IP addresses other than local if not explicitly allowed.
@@ -45,11 +63,11 @@ class JsonRpcServer {
             }
         }).listen(config.port, config.allowip.length ? '0.0.0.0' : '127.0.0.1');
 
-
         /** @type {Map.<string, function(*)>} */
         this._methods = new Map();
 
-        this._consensus_state = 'syncing';
+        /** @type {string} */
+        this._consensusState = 'syncing';
     }
 
     /**
@@ -58,7 +76,7 @@ class JsonRpcServer {
      * @param {Accounts} accounts
      * @param {Mempool} mempool
      * @param {Network} network
-     * @param {Miner} miner
+     * @param {Miner|SmartPoolMiner|NanoPoolMiner} miner
      * @param {WalletStore} walletStore
      */
     init(consensus, blockchain, accounts, mempool, network, miner, walletStore) {
@@ -71,9 +89,9 @@ class JsonRpcServer {
         this._walletStore = walletStore;
 
         this._startingBlock = blockchain.height;
-        this._consensus.on('established', () => this._consensus_state = 'established');
-        this._consensus.on('syncing', () => this._consensus_state = 'syncing');
-        this._consensus.on('lost', () => this._consensus_state = 'lost');
+        this._consensus.on('established', () => this._consensusState = 'established');
+        this._consensus.on('syncing', () => this._consensusState = 'syncing');
+        this._consensus.on('lost', () => this._consensusState = 'lost');
 
         // Network
         this._methods.set('peerCount', this.peerCount.bind(this));
@@ -84,6 +102,7 @@ class JsonRpcServer {
 
         // Transactions
         this._methods.set('sendRawTransaction', this.sendRawTransaction.bind(this));
+        this._methods.set('createRawTransaction', this.createRawTransaction.bind(this));
         this._methods.set('sendTransaction', this.sendTransaction.bind(this));
         this._methods.set('getTransactionByBlockHashAndIndex', this.getTransactionByBlockHashAndIndex.bind(this));
         this._methods.set('getTransactionByBlockNumberAndIndex', this.getTransactionByBlockNumberAndIndex.bind(this));
@@ -98,6 +117,10 @@ class JsonRpcServer {
         this._methods.set('mining', this.mining.bind(this));
         this._methods.set('hashrate', this.hashrate.bind(this));
         this._methods.set('minerThreads', this.minerThreads.bind(this));
+        this._methods.set('minerAddress', this.minerAddress.bind(this));
+        this._methods.set('pool', this.pool.bind(this));
+        this._methods.set('poolConnectionState', this.poolConnectionState.bind(this));
+        this._methods.set('poolConfirmedBalance', this.poolConfirmedBalance.bind(this));
 
         // Accounts
         this._methods.set('accounts', this.accounts.bind(this));
@@ -114,30 +137,15 @@ class JsonRpcServer {
 
         this._methods.set('constant', this.constant.bind(this));
         this._methods.set('log', this.log.bind(this));
-    }
 
-    constant(constant, value) {
-        if (typeof value !== 'undefined') {
-            if (value === 'reset') {
-                Nimiq.ConstantHelper.instance.reset(constant);
-            } else {
-                value = parseInt(value);
-                Nimiq.ConstantHelper.instance.set(constant, value);
+        // Apply method whitelist if configured.
+        if (this._config.methods && this._config.methods.length > 0) {
+            const whitelist = new Set(this._config.methods);
+            for (const method of this._methods.keys()) {
+                if (!whitelist.has(method)) {
+                    this._methods.delete(method);
+                }
             }
-        }
-        return Nimiq.ConstantHelper.instance.get(constant);
-    }
-
-    log(tag, level) {
-        if (tag && level) {
-            if (tag === '*') {
-                Nimiq.Log.instance.level = level;
-            } else {
-                Nimiq.Log.instance.setLoggable(tag, level);
-            }
-            return true;
-        } else {
-            throw new Error('Missing argument');
         }
     }
 
@@ -155,7 +163,6 @@ class JsonRpcServer {
             res.end();
             return false;
         }
-
         return true;
     }
 
@@ -169,11 +176,11 @@ class JsonRpcServer {
     }
 
     consensus() {
-        return this._consensus_state;
+        return this._consensusState;
     }
 
     syncing() {
-        if (this._consensus_state === 'established') return false;
+        if (this._consensusState === 'established') return false;
         const currentBlock = this._blockchain.height;
         const highestBlock = this._blockchain.height; // TODO
         return {
@@ -245,8 +252,8 @@ class JsonRpcServer {
      * Transactions
      */
 
-    async sendRawTransaction(txhex) {
-        const tx = Nimiq.Transaction.unserialize(Nimiq.BufferUtils.fromHex(txhex));
+    async sendRawTransaction(txHex) {
+        const tx = Nimiq.Transaction.unserialize(Nimiq.BufferUtils.fromHex(txHex));
         const ret = await this._mempool.pushTransaction(tx);
         if (ret < 0) {
             const e = new Error(`Transaction not accepted: ${ret}`);
@@ -256,7 +263,7 @@ class JsonRpcServer {
         return tx.hash().toHex();
     }
 
-    async sendTransaction(tx) {
+    async createRawTransaction(tx) {
         const from = Nimiq.Address.fromString(tx.from);
         const fromType = tx.fromType ? Number.parseInt(tx.fromType) : Nimiq.Account.Type.BASIC;
         const to = Nimiq.Address.fromString(tx.to);
@@ -278,13 +285,11 @@ class JsonRpcServer {
         } else {
             transaction = wallet.createTransaction(to, value, fee, this._blockchain.height);
         }
-        const ret = await this._mempool.pushTransaction(transaction);
-        if (ret < 0) {
-            const e = new Error(`Transaction not accepted: ${ret}`);
-            e.code = ret;
-            throw e;
-        }
-        return transaction.hash().toHex();
+        return Nimiq.BufferUtils.toHex(transaction.serialize());
+    }
+
+    async sendTransaction(tx) {
+        return this.sendRawTransaction(await this.createRawTransaction(tx));
     }
 
     async getTransactionByBlockHashAndIndex(blockHash, txIndex) {
@@ -380,22 +385,86 @@ class JsonRpcServer {
      */
 
     mining(enabled) {
-        if (!this._miner) throw new Error('This node does not include a miner');
-        if (!this._miner.working && enabled === true) this._miner.startWork();
-        if (this._miner.working && enabled === false) this._miner.stopWork();
-        return this._miner.working;
+        if (enabled === true) {
+            this._minerConfig.enabled = true;
+            if (this._poolConfig.enabled && this._isPoolValid() && this._miner.isDisconnected()) {
+                this._miner.connect(this._poolConfig.host, this._poolConfig.port);
+            }
+            if (!this._miner.working && this._consensus.established) this._miner.startWork();
+        } else if (enabled === false) {
+            this._minerConfig.enabled = false;
+            if (this._miner.working) this._miner.stopWork();
+            if (this._miner instanceof Nimiq.BasePoolMiner && !this._miner.isDisconnected()) {
+                this._miner.disconnect();
+            }
+        }
+        return this._minerConfig.enabled;
     }
 
     hashrate() {
-        if (!this._miner) throw new Error('This node does not include a miner');
         return this._miner.hashrate;
     }
 
     minerThreads(threads) {
         if (typeof threads === 'number') {
             this._miner.threads = threads;
+            this._minerConfig.threads = threads;
         }
         return this._miner.threads;
+    }
+
+    minerAddress() {
+        return this._miner.address.toUserFriendlyAddress();
+    }
+
+    pool(pool) {
+        if (pool && !(this._miner instanceof Nimiq.BasePoolMiner)) {
+            throw new Error('Client was not started with the pool miner option.');
+        }
+        if (typeof pool === 'string') {
+            let [host, port] = pool.split(':');
+            port = parseInt(port);
+            if (!this._isPoolValid(host, port)) {
+                throw new Error('Pool must be specified as `host:port`');
+            }
+            this._poolConfig.host = host;
+            this._poolConfig.port = port;
+            if (!this._miner.isDisconnected()) {
+                // disconnect from old pool
+                this._miner.disconnect();
+            }
+            pool = true;
+        }
+
+        if (pool === true) {
+            if (!this._isPoolValid()) {
+                throw new Error('No valid pool specified.');
+            }
+            this._poolConfig.enabled = true;
+            if (this._miner.isDisconnected()) {
+                this._miner.connect(this._poolConfig.host, this._poolConfig.port);
+            }
+        } else if (pool === false) {
+            this._poolConfig.enabled = false;
+            if (this._miner instanceof Nimiq.BasePoolMiner
+                && !this._miner.isDisconnected()) {
+                this._miner.disconnect();
+            }
+        }
+
+        return this._poolConfig.enabled && this._isPoolValid(this._miner.host, this._miner.port)
+            ? `${this._miner.host}:${this._miner.port}`
+            : null;
+    }
+
+    poolConnectionState() {
+        return typeof this._miner.connectionState !== 'undefined'
+            ? this._miner.connectionState
+            : Nimiq.BasePoolMiner.ConnectionState.CLOSED;
+    }
+
+    poolConfirmedBalance() {
+        return this._miner.confirmedBalance || 0;
     }
 
     /*
@@ -451,6 +520,41 @@ class JsonRpcServer {
         return block ? this._blockToObj(block, includeTransactions) : null;
     }
 
+
+    /*
+     * Utils
+     */
+
+    constant(constant, value) {
+        if (typeof value !== 'undefined') {
+            if (value === 'reset') {
+                Nimiq.ConstantHelper.instance.reset(constant);
+            } else {
+                value = parseInt(value);
+                Nimiq.ConstantHelper.instance.set(constant, value);
+            }
+        }
+        return Nimiq.ConstantHelper.instance.get(constant);
+    }
+
+    log(tag, level) {
+        if (tag && level) {
+            if (tag === '*') {
+                Nimiq.Log.instance.level = level;
+            } else {
+                Nimiq.Log.instance.setLoggable(tag, level);
+            }
+            return true;
+        } else {
+            throw new Error('Missing argument');
+        }
+    }
+
+    /**
+     * @param {number|string} number
+     * @returns {Promise.<?Block>}
+     * @private
+     */
     _getBlockByNumber(number) {
         if (typeof number === 'string') {
             if (number.startsWith('latest-')) {
@@ -462,8 +566,20 @@ class JsonRpcServer {
             }
         }
         if (number === 0) number = 1;
-        if (number === 1) return Nimiq.GenesisConfig.GENESIS_BLOCK;
+        if (number === 1) return Promise.resolve(Nimiq.GenesisConfig.GENESIS_BLOCK);
         return this._blockchain.getBlockAt(number, /*includeBody*/ true);
+    }
+
+    /**
+     * @param {string} [host]
+     * @param {number} [port]
+     * @returns {boolean}
+     * @private
+     */
+    _isPoolValid(host, port) {
+        host = typeof host !== 'undefined' ? host : this._poolConfig.host;
+        port = typeof port !== 'undefined' ? port : this._poolConfig.port;
+        return typeof host === 'string' && host && typeof port === 'number' && !Number.isNaN(port) && port >= 0;
     }
 
     /**
